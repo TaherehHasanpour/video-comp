@@ -18,27 +18,35 @@
           <div v-if="it.status">وضعیت: {{ it.status }}</div>
           <div v-if="it.progress >= 0">پیشرفت آپلود: {{ it.progress }}%</div>
           <button @click="removeItem(idx)">حذف</button>
-          <button @click="downloadAllUploaded" :disabled="items.length === 0">
-            دانلود همه فایل‌های آپلود شده
-          </button>
+
+          <!-- لینک دانلود و مشاهده فایل -->
+          <div v-if="it.uploadedUrl">
+            <a :href="it.uploadedUrl" target="_blank">مشاهده فایل آپلود شده</a>
+          </div>
+          <div v-if="it.compressedUrl">
+            <video v-if="it.type.startsWith('video/')" :src="it.compressedUrl" controls></video>
+            <a :href="it.compressedUrl" download>دانلود فایل فشرده شده</a>
+          </div>
         </div>
       </div>
     </div>
 
     <div class="controls">
-      <label>حداکثر عرض عکس (px): <input type="number" v-model.number="imageMaxWidth" /></label>
-      <label
-        >حداکثر حجم عکس (MB): <input step="0.1" type="number" v-model.number="imageMaxMB"
-      /></label>
-      <label
-        >کیفیت عکس (0.1-1): <input step="0.1" type="number" v-model.number="imageQuality"
-      /></label>
-      <label
-        >رزولوشن هدف ویدئو (عرض px): <input type="number" v-model.number="videoTargetWidth"
-      /></label>
-      <label
-        >بیت‌ریت هدف ویدئو (kbps): <input type="number" v-model.number="videoTargetKbps"
-      /></label>
+      <label>حداکثر عرض عکس (px):
+        <input type="number" v-model.number="imageMaxWidth" />
+      </label>
+      <label>حداکثر حجم عکس (MB):
+        <input step="0.1" type="number" v-model.number="imageMaxMB" />
+      </label>
+      <label>کیفیت عکس (0.1-1):
+        <input step="0.1" type="number" v-model.number="imageQuality" />
+      </label>
+      <label>رزولوشن هدف ویدئو (عرض px):
+        <input type="number" v-model.number="videoTargetWidth" />
+      </label>
+      <label>بیت‌ریت هدف ویدئو (kbps):
+        <input type="number" v-model.number="videoTargetKbps" />
+      </label>
     </div>
 
     <div class="actions">
@@ -51,13 +59,14 @@
     <pre v-if="lastResponse">پاسخ سرور: {{ lastResponse }}</pre>
   </div>
 </template>
+
 <script setup>
 import { ref } from 'vue'
 import imageCompression from 'browser-image-compression'
 import axios from 'axios'
 
 const fileInput = ref(null)
-const items = ref([]) // { file, type, previewUrl, status, progress }
+const items = ref([]) // { file, type, previewUrl, status, progress, uploadedUrl, compressedUrl }
 const processing = ref(false)
 const lastResponse = ref(null)
 
@@ -84,7 +93,9 @@ function onFileChange(e) {
       type: f.type,
       previewUrl: URL.createObjectURL(f),
       status: 'آماده',
-      progress: -1,
+      progress: 0,
+      uploadedUrl: null,
+      compressedUrl: null,
     }
     items.value.push(obj)
   }
@@ -93,11 +104,17 @@ function onFileChange(e) {
 function removeItem(idx) {
   const it = items.value[idx]
   URL.revokeObjectURL(it.previewUrl)
+  if (it.compressedUrl) URL.revokeObjectURL(it.compressedUrl)
+  if (it.uploadedUrl) URL.revokeObjectURL(it.uploadedUrl)
   items.value.splice(idx, 1)
 }
 
 function clearAll() {
-  for (const it of items.value) URL.revokeObjectURL(it.previewUrl)
+  for (const it of items.value) {
+    URL.revokeObjectURL(it.previewUrl)
+    if (it.compressedUrl) URL.revokeObjectURL(it.compressedUrl)
+    if (it.uploadedUrl) URL.revokeObjectURL(it.uploadedUrl)
+  }
   items.value = []
 }
 
@@ -109,18 +126,14 @@ async function processAndUpload() {
       it.status = 'در حال فشرده‌سازی'
       let toUploadBlob = null
 
-      // 📥 حجم اولیه
       console.log(`📥 فایل انتخاب شد: ${it.file.name} — حجم اصلی: ${formatBytes(it.file.size)}`)
 
       if (it.type.startsWith('image/')) {
         try {
           const compressedFile = await compressImage(it.file)
           toUploadBlob = compressedFile
-          it.uploadedBlob = compressedFile // ذخیره برای دانلود
           it.status = `فشرده شد — ${formatBytes(compressedFile.size)}`
-          console.log(
-            `📉 تصویر ${it.file.name} — بعد از فشرده‌سازی: ${formatBytes(compressedFile.size)}`,
-          )
+          console.log(`📉 تصویر ${it.file.name} — بعد از فشرده‌سازی: ${formatBytes(compressedFile.size)}`)
         } catch (err) {
           console.error('❌ خطا در فشرده‌سازی تصویر', err)
           it.status = 'خطا در فشرده‌سازی تصویر — ارسال اصلی'
@@ -137,11 +150,9 @@ async function processAndUpload() {
             it.file.name.replace(/\.[^.]+$/, '.webm'),
             { type: compressedVideoBlob.type },
           )
-          it.uploadedBlob = toUploadBlob // ذخیره برای دانلود
           it.status = `فشرده شد — ${formatBytes(toUploadBlob.size)}`
-          console.log(
-            `📉 ویدئو ${it.file.name} — بعد از فشرده‌سازی: ${formatBytes(toUploadBlob.size)}`,
-          )
+          it.compressedUrl = URL.createObjectURL(compressedVideoBlob)
+          console.log(`📉 ویدئو ${it.file.name} — بعد از فشرده‌سازی: ${formatBytes(toUploadBlob.size)}`)
         } catch (err) {
           console.error('❌ خطا در فشرده‌سازی ویدئو', err)
           it.status = 'خطا در فشرده‌سازی ویدئو — ارسال اصلی'
@@ -151,7 +162,6 @@ async function processAndUpload() {
         toUploadBlob = it.file
       }
 
-      // ⬆️ شروع آپلود
       console.log(`⬆️ شروع آپلود: ${it.file.name}`)
       it.status = 'در حال آپلود'
       await uploadFile(toUploadBlob, it)
@@ -174,10 +184,13 @@ async function uploadFile(blobOrFile, it) {
           it.progress = Math.round((e.loaded * 100) / e.total)
         }
       },
-      timeout: 5 * 60 * 1000, // 5 دقیقه
+      timeout: 5 * 60 * 1000,
     })
     it.status = 'آپلود موفق'
     lastResponse.value = JSON.stringify(res.data).slice(0, 2000)
+
+    // چون httpbin فایل واقعی باز نمی‌گرداند، برای تست لینک blob ایجاد می‌کنیم
+    it.uploadedUrl = URL.createObjectURL(blobOrFile)
     console.log(`✅ آپلود موفق: ${it.file.name}`)
   } catch (err) {
     console.error('❌ خطا در آپلود', err)
@@ -197,11 +210,10 @@ async function compressImage(file) {
   return compressedFile
 }
 
-// ------------------ Video compression (client-side) ------------------
+// ------------------ Video compression ------------------
 function compressVideo(file, { width = 1280, kbps = 800 } = {}) {
   return new Promise((resolve, reject) => {
-    if (typeof MediaRecorder === 'undefined')
-      return reject(new Error('MediaRecorder پشتیبانی نمی‌شود'))
+    if (typeof MediaRecorder === 'undefined') return reject(new Error('MediaRecorder پشتیبانی نمی‌شود'))
 
     const url = URL.createObjectURL(file)
     const video = document.createElement('video')
@@ -225,18 +237,14 @@ function compressVideo(file, { width = 1280, kbps = 800 } = {}) {
         const stream = canvas.captureStream(fps)
 
         const mimeTypeCandidates = ['video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm']
-        let mimeType =
-          mimeTypeCandidates.find(
-            (m) => MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(m),
-          ) || 'video/webm'
+        const mimeType =
+          mimeTypeCandidates.find((m) => MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(m)) ||
+          'video/webm'
 
         const bitrate = kbps * 1000
-        let options = { mimeType }
-        try {
-          options.videoBitsPerSecond = bitrate
-        } catch (e) {}
+        const options = { mimeType, videoBitsPerSecond: bitrate }
 
-        let recordedChunks = []
+        const recordedChunks = []
         let mediaRecorder
         try {
           mediaRecorder = new MediaRecorder(stream, options)
@@ -257,12 +265,9 @@ function compressVideo(file, { width = 1280, kbps = 800 } = {}) {
 
         video.addEventListener('play', () => {
           mediaRecorder.start(1000)
-
           function draw() {
             if (video.paused || video.ended) {
-              try {
-                mediaRecorder.stop()
-              } catch (e) {}
+              try { mediaRecorder.stop() } catch {}
               return
             }
             ctx.drawImage(video, 0, 0, canvas.width, canvas.height)
@@ -275,25 +280,10 @@ function compressVideo(file, { width = 1280, kbps = 800 } = {}) {
       } catch (err) {
         reject(err)
       }
-    })
+    }, { once: true })
 
     video.addEventListener('error', () => reject(new Error('خطا در بارگذاری ویدئو')))
   })
-}
-
-function downloadAllUploaded() {
-  for (const item of items.value) {
-    const blob = item.uploadedBlob
-    if (!blob) continue
-    const url = URL.createObjectURL(blob)
-    const a = document.createElement('a')
-    a.href = url
-    a.download = blob.name || item.file.name
-    document.body.appendChild(a)
-    a.click()
-    document.body.removeChild(a)
-    URL.revokeObjectURL(url)
-  }
 }
 </script>
 
