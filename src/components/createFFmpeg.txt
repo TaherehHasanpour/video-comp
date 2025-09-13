@@ -1,0 +1,340 @@
+<template>
+  <div class="uploader">
+    <h2>آپلود و فشرده‌سازی عکس و ویدئو</h2>
+    <input ref="fileInput" type="file" multiple @change="onFileChange" accept="image/*,video/*" />
+
+    <div v-if="items.length" class="items">
+      <div v-for="(it, idx) in items" :key="idx" class="item-card">
+        <div class="preview">
+          <img v-if="it.type.startsWith('image/')" :src="it.previewUrl" alt="preview" />
+          <video v-else controls :src="it.previewUrl" preload="metadata"></video>
+        </div>
+        <div class="meta">
+          <div>
+            <strong>{{ it.file.name }}</strong> — {{ formatBytes(it.file.size) }}
+          </div>
+          <div>نوع: {{ it.type }}</div>
+          <div v-if="it.status">وضعیت: {{ it.status }}</div>
+          <div v-if="it.progress >= 0">
+            پیشرفت آپلود: {{ it.progress }}%
+            <div class="progress-bar">
+              <div class="progress-bar-inner" :style="{ width: it.progress + '%' }"></div>
+            </div>
+          </div>
+          <button @click="removeItem(idx)">حذف</button>
+          <div v-if="it.uploadedUrl">
+            <a :href="it.uploadedUrl" target="_blank">مشاهده فایل آپلود شده</a>
+          </div>
+          <div v-if="it.compressedUrl">
+            <video v-if="it.type.startsWith('video/')" :src="it.compressedUrl" controls></video>
+            <a :href="it.compressedUrl" download>دانلود فایل فشرده شده</a>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="controls">
+      <label>حداکثر عرض عکس (px):<input type="number" v-model.number="imageMaxWidth" /></label>
+      <label
+        >حداکثر حجم عکس (MB):<input step="0.1" type="number" v-model.number="imageMaxMB"
+      /></label>
+      <label
+        >کیفیت عکس (0.1-1):<input step="0.1" type="number" v-model.number="imageQuality"
+      /></label>
+      <label
+        >رزولوشن هدف ویدئو (عرض px):<input type="number" v-model.number="videoTargetWidth"
+      /></label>
+      <label
+        >بیت‌ریت هدف ویدئو (kbps):<input type="number" v-model.number="videoTargetKbps"
+      /></label>
+      <label>
+        حالت فشرده‌سازی ویدئو:
+        <select v-model="videoCompressionMethod">
+          <option value="ffmpeg">FFmpeg (کیفیت بهتر)</option>
+          <option value="mediarecorder">MediaRecorder (سریع‌تر)</option>
+        </select>
+      </label>
+    </div>
+
+    <div class="actions">
+      <button @click="processAndUpload" :disabled="processing || !items.length">
+        فشرده‌سازی و آپلود همه
+      </button>
+      <button @click="clearAll">پاک کردن همه</button>
+    </div>
+
+    <pre v-if="lastResponse">پاسخ سرور: {{ lastResponse }}</pre>
+  </div>
+</template>
+
+<script setup>
+import { ref, onMounted } from 'vue'
+import imageCompression from 'browser-image-compression'
+import axios from 'axios'
+import { createFFmpeg, fetchFile } from '@ffmpeg/ffmpeg'
+
+const ffmpeg = ref(null)
+const fileInput = ref(null)
+const items = ref([])
+const processing = ref(false)
+const lastResponse = ref(null)
+
+// تنظیمات
+const imageMaxWidth = ref(1280)
+const imageMaxMB = ref(0.5)
+const imageQuality = ref(0.7)
+const videoTargetWidth = ref(720)
+const videoTargetKbps = ref(600)
+const videoCompressionMethod = ref('ffmpeg')
+
+onMounted(async () => {
+  if (videoCompressionMethod.value === 'ffmpeg') {
+    ffmpeg.value = createFFmpeg({ log: true })
+    await ffmpeg.value.load()
+    console.log('FFmpeg loaded')
+  }
+})
+
+function formatBytes(bytes) {
+  if (bytes === 0) return '0 B'
+  const k = 1024
+  const sizes = ['B', 'KB', 'MB', 'GB']
+  const i = Math.floor(Math.log(bytes) / Math.log(k))
+  return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i]
+}
+
+function onFileChange(e) {
+  const selected = Array.from(e.target.files || [])
+  selected.forEach((f) => {
+    items.value.push({
+      file: f,
+      type: f.type,
+      previewUrl: URL.createObjectURL(f),
+      status: 'آماده',
+      progress: 0,
+      uploadedUrl: null,
+      compressedUrl: null,
+    })
+  })
+}
+
+function removeItem(idx) {
+  const it = items.value[idx]
+  URL.revokeObjectURL(it.previewUrl)
+  if (it.compressedUrl) URL.revokeObjectURL(it.compressedUrl)
+  if (it.uploadedUrl) URL.revokeObjectURL(it.uploadedUrl)
+  items.value.splice(idx, 1)
+}
+
+function clearAll() {
+  items.value.forEach((it) => {
+    URL.revokeObjectURL(it.previewUrl)
+    if (it.compressedUrl) URL.revokeObjectURL(it.compressedUrl)
+    if (it.uploadedUrl) URL.revokeObjectURL(it.uploadedUrl)
+  })
+  items.value = []
+}
+
+async function processAndUpload() {
+  processing.value = true
+  lastResponse.value = null
+  try {
+    await Promise.all(
+      items.value.map(async (it) => {
+        it.status = 'در حال فشرده‌سازی'
+        let toUploadBlob = it.file
+
+        if (it.type.startsWith('image/')) {
+          try {
+            const compressed = await imageCompression(it.file, {
+              maxSizeMB: imageMaxMB.value,
+              maxWidthOrHeight: imageMaxWidth.value,
+              initialQuality: imageQuality.value,
+              useWebWorker: true,
+            })
+            toUploadBlob = compressed
+            it.status = `فشرده شد — ${formatBytes(compressed.size)}`
+          } catch {
+            it.status = 'خطا در فشرده‌سازی تصویر — ارسال اصلی'
+          }
+        } else if (it.type.startsWith('video/')) {
+          try {
+            let compressedBlob
+            if (videoCompressionMethod.value === 'ffmpeg') {
+              compressedBlob = await compressVideoWithFFmpeg(it.file)
+            } else {
+              compressedBlob = await compressVideoWithMediaRecorder(it.file)
+            }
+            toUploadBlob = new File([compressedBlob], it.file.name.replace(/\.[^.]+$/, '.webm'), {
+              type: compressedBlob.type,
+            })
+            it.compressedUrl = URL.createObjectURL(compressedBlob)
+            it.status = `فشرده شد — ${formatBytes(toUploadBlob.size)}`
+          } catch (err) {
+            console.error(err)
+            it.status = 'خطا در فشرده‌سازی ویدئو — ارسال اصلی'
+          }
+        }
+
+        it.status = 'در حال آپلود'
+        await uploadFile(toUploadBlob, it)
+      }),
+    )
+  } finally {
+    processing.value = false
+  }
+}
+
+async function uploadFile(blobOrFile, it) {
+  const form = new FormData()
+  form.append('file', blobOrFile, blobOrFile.name || 'upload')
+  try {
+    const res = await axios.post('https://httpbin.org/post', form, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+      onUploadProgress: (e) => {
+        if (e.lengthComputable) it.progress = Math.round((e.loaded * 100) / e.total)
+      },
+    })
+    it.status = 'آپلود موفق'
+    lastResponse.value = JSON.stringify(res.data).slice(0, 2000)
+    it.uploadedUrl = URL.createObjectURL(blobOrFile)
+  } catch {
+    it.status = 'خطا در آپلود'
+  }
+}
+
+async function compressVideoWithFFmpeg(file) {
+  if (!ffmpeg.value || !ffmpeg.value.isLoaded()) throw new Error('FFmpeg is not loaded')
+  ffmpeg.value.FS('writeFile', file.name, await fetchFile(file))
+  const output = 'compressed.webm'
+  await ffmpeg.value.run(
+    '-i',
+    file.name,
+    '-vf',
+    `scale=${videoTargetWidth.value}:-2`,
+    '-c:v',
+    'libvpx-vp9',
+    '-b:v',
+    `${videoTargetKbps.value}k`,
+    '-c:a',
+    'libopus',
+    output,
+  )
+  const data = ffmpeg.value.FS('readFile', output)
+  ffmpeg.value.FS('unlink', file.name)
+  ffmpeg.value.FS('unlink', output)
+  return new Blob([data.buffer], { type: 'video/webm' })
+}
+
+function compressVideoWithMediaRecorder(file) {
+  return new Promise((resolve, reject) => {
+    const video = document.createElement('video')
+    video.src = URL.createObjectURL(file)
+    video.muted = true
+    video.playsInline = true
+    video.preload = 'auto'
+
+    video.addEventListener('loadedmetadata', () => {
+      const aspect = video.videoWidth / video.videoHeight
+      const targetWidth = Math.min(videoTargetWidth.value, video.videoWidth)
+      const stream = video.captureStream()
+      const mimeType = MediaRecorder.isTypeSupported('video/webm;codecs=vp8')
+        ? 'video/webm;codecs=vp8'
+        : 'video/webm'
+      const recorder = new MediaRecorder(stream, {
+        mimeType,
+        videoBitsPerSecond: videoTargetKbps.value * 1000,
+      })
+      const chunks = []
+
+      recorder.ondataavailable = (e) => {
+        if (e.data.size > 0) chunks.push(e.data)
+      }
+      recorder.onstop = () => resolve(new Blob(chunks, { type: mimeType }))
+
+      video.play().then(() => {
+        if (recorder.state === 'inactive') recorder.start(500)
+      })
+      video.addEventListener(
+        'ended',
+        () => {
+          if (recorder.state === 'recording') recorder.stop()
+        },
+        { once: true },
+      )
+    })
+    video.addEventListener('error', () => reject(new Error('خطا در بارگذاری ویدئو')))
+  })
+}
+</script>
+
+<style scoped>
+.uploader {
+  max-width: 900px;
+  margin: 1rem auto;
+  padding: 2rem;
+  border: 1px solid #ddd;
+  border-radius: 12px;
+  background: white;
+}
+.items {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1rem;
+}
+.item-card {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  border: 1px solid #eee;
+  padding: 0.5rem;
+  border-radius: 6px;
+  width: 300px;
+}
+.preview img,
+.preview video {
+  max-width: 100%;
+  max-height: 180px;
+  display: block;
+  border-radius: 6px;
+}
+.controls {
+  margin-top: 1rem;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
+  gap: 0.5rem;
+}
+.actions {
+  margin-top: 1rem;
+  display: flex;
+  gap: 1rem;
+  justify-content: center;
+}
+.progress-bar {
+  height: 8px;
+  background: #ecf0f1;
+  border-radius: 4px;
+  overflow: hidden;
+  margin: 0.5rem 0;
+}
+.progress-bar-inner {
+  height: 100%;
+  background: #3498db;
+  transition: width 0.3s;
+}
+button {
+  padding: 0.5rem 1rem;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  background: #3498db;
+  color: white;
+}
+button:hover {
+  background: #2980b9;
+}
+button:disabled {
+  background: #95a5a6;
+  cursor: not-allowed;
+}
+</style>
