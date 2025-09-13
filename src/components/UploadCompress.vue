@@ -2,81 +2,112 @@
   <div class="uploader">
     <h2>آپلود و فشرده‌سازی عکس و ویدئو</h2>
 
-    <input ref="fileInput" type="file" multiple @change="onFileChange" accept="image/*,video/*" />
-
-    <div v-if="items.length" class="items">
-      <div v-for="(it, idx) in items" :key="idx" class="item-card">
-        <div class="preview">
-          <img v-if="it.type.startsWith('image/')" :src="it.previewUrl" alt="preview" />
-          <video v-else controls :src="it.previewUrl" preload="metadata"></video>
-        </div>
-        <div class="meta">
-          <div>
-            <strong>{{ it.file.name }}</strong> — {{ formatBytes(it.file.size) }}
-          </div>
-          <div>نوع: {{ it.type }}</div>
-          <div v-if="it.status">وضعیت: {{ it.status }}</div>
-          <div v-if="it.progress >= 0">پیشرفت آپلود: {{ it.progress }}%</div>
-          <button @click="removeItem(idx)">حذف</button>
-
-          <!-- لینک دانلود و مشاهده فایل -->
-          <div v-if="it.uploadedUrl">
-            <a :href="it.uploadedUrl" target="_blank">مشاهده فایل آپلود شده</a>
-          </div>
-          <div v-if="it.compressedUrl">
-            <video v-if="it.type.startsWith('video/')" :src="it.compressedUrl" controls></video>
-            <a :href="it.compressedUrl" download>دانلود فایل فشرده شده</a>
-          </div>
-        </div>
-      </div>
-    </div>
+    <FilePond
+      ref="pond"
+      :allow-multiple="true"
+      :accepted-file-types="['image/*', 'video/*']"
+      :server="serverConfig"
+      @addfile="onAddFile"
+      label-idle="فایل را بکشید یا کلیک کنید"
+    />
 
     <div class="controls">
-      <label>حداکثر عرض عکس (px):
-        <input type="number" v-model.number="imageMaxWidth" />
-      </label>
-      <label>حداکثر حجم عکس (MB):
-        <input step="0.1" type="number" v-model.number="imageMaxMB" />
-      </label>
-      <label>کیفیت عکس (0.1-1):
-        <input step="0.1" type="number" v-model.number="imageQuality" />
-      </label>
-      <label>رزولوشن هدف ویدئو (عرض px):
+      <label
+        >رزولوشن هدف ویدئو (عرض px):
         <input type="number" v-model.number="videoTargetWidth" />
       </label>
-      <label>بیت‌ریت هدف ویدئو (kbps):
+      <label
+        >بیت‌ریت هدف ویدئو (kbps):
         <input type="number" v-model.number="videoTargetKbps" />
       </label>
     </div>
-
-    <div class="actions">
-      <button @click="processAndUpload" :disabled="processing || !items.length">
-        فشرده‌سازی و آپلود همه
-      </button>
-      <button @click="clearAll">پاک کردن همه</button>
-    </div>
-
-    <pre v-if="lastResponse">پاسخ سرور: {{ lastResponse }}</pre>
   </div>
 </template>
 
 <script setup>
 import { ref } from 'vue'
-import imageCompression from 'browser-image-compression'
+import vueFilePond from 'vue-filepond'
+import FilePondPluginFileValidateType from 'filepond-plugin-file-validate-type'
+import FilePondPluginFileEncode from 'filepond-plugin-file-encode'
 import axios from 'axios'
 
-const fileInput = ref(null)
-const items = ref([]) // { file, type, previewUrl, status, progress, uploadedUrl, compressedUrl }
-const processing = ref(false)
-const lastResponse = ref(null)
+const FilePond = vueFilePond(FilePondPluginFileValidateType, FilePondPluginFileEncode)
+const pond = ref(null)
+// درست:
+// const FilePond = vueFilePond(FilePondPluginFileValidateType)
 
-// تنظیمات قابل تغییر
-const imageMaxWidth = ref(1920)
-const imageMaxMB = ref(0.6)
-const imageQuality = ref(0.75)
+// import FilePondPluginFileValidateType from 'filepond-plugin-file-validate-type'
+
+// const FilePond = vueFilePond(FilePondPluginFileValidateType, FilePondPluginFileEncode) // حذف شد
+// const FilePond = vueFilePond(FilePondPluginFileValidateType)
+
 const videoTargetWidth = ref(1280)
-const videoTargetKbps = ref(800) // kbps
+const videoTargetKbps = ref(800)
 
+// ------------------ Config Server ------------------
+const serverConfig = {
+  process: (fieldName, file, metadata, load, error, progress, abort) => {
+    // فقط برای تست، آپلود مستقیم به httpbin
+    const formData = new FormData()
+    formData.append(fieldName, file, file.name)
+
+    const request = axios
+      .post('https://httpbin.org/post', formData, {
+        onUploadProgress: (e) => {
+          progress(e.lengthComputable, e.loaded, e.total)
+        },
+      })
+      .then((res) => {
+        load(res.data.url || file.name) // URL فایل آپلود شده
+      })
+      .catch((err) => {
+        error('Upload failed')
+      })
+
+    return {
+      abort: () => {
+        request.cancel()
+        abort()
+      },
+    }
+  },
+}
+
+// ------------------ فایل اضافه شد ------------------
+async function onAddFile(error, fileItem) {
+  if (error) return
+
+  const file = fileItem.file
+
+  // اگر فایل فشرده شده است، دوباره فشرده نکن
+  if (fileItem.getMetadata('compressed')) return
+
+  if (file.type.startsWith('video/')) {
+    console.log(`📥 ویدئو اضافه شد: ${file.name} — حجم اصلی: ${formatBytes(file.size)}`)
+
+    try {
+      const compressedBlob = await compressVideo(file, {
+        width: videoTargetWidth.value,
+        kbps: videoTargetKbps.value,
+      })
+
+      console.log(`📉 ویدئو ${file.name} — بعد از فشرده‌سازی: ${formatBytes(compressedBlob.size)}`)
+
+      const compressedFile = new File([compressedBlob], file.name.replace(/\.[^.]+$/, '.webm'), {
+        type: compressedBlob.type,
+      })
+
+      // اضافه کردن metadata برای جلوگیری از دوباره فشرده کردن
+      pond.value.removeFile(fileItem.id)
+      const newFileItem = await pond.value.addFile(compressedFile)
+      newFileItem.setMetadata('compressed', true)
+    } catch (err) {
+      console.error('❌ خطا در فشرده‌سازی ویدئو', err)
+    }
+  }
+}
+
+// ------------------ کمکی ------------------
 function formatBytes(bytes) {
   if (bytes === 0) return '0 B'
   const k = 1024
@@ -85,135 +116,10 @@ function formatBytes(bytes) {
   return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i]
 }
 
-function onFileChange(e) {
-  const selected = Array.from(e.target.files || [])
-  for (const f of selected) {
-    const obj = {
-      file: f,
-      type: f.type,
-      previewUrl: URL.createObjectURL(f),
-      status: 'آماده',
-      progress: 0,
-      uploadedUrl: null,
-      compressedUrl: null,
-    }
-    items.value.push(obj)
-  }
-}
-
-function removeItem(idx) {
-  const it = items.value[idx]
-  URL.revokeObjectURL(it.previewUrl)
-  if (it.compressedUrl) URL.revokeObjectURL(it.compressedUrl)
-  if (it.uploadedUrl) URL.revokeObjectURL(it.uploadedUrl)
-  items.value.splice(idx, 1)
-}
-
-function clearAll() {
-  for (const it of items.value) {
-    URL.revokeObjectURL(it.previewUrl)
-    if (it.compressedUrl) URL.revokeObjectURL(it.compressedUrl)
-    if (it.uploadedUrl) URL.revokeObjectURL(it.uploadedUrl)
-  }
-  items.value = []
-}
-
-async function processAndUpload() {
-  processing.value = true
-  lastResponse.value = null
-  try {
-    for (const it of items.value) {
-      it.status = 'در حال فشرده‌سازی'
-      let toUploadBlob = null
-
-      console.log(`📥 فایل انتخاب شد: ${it.file.name} — حجم اصلی: ${formatBytes(it.file.size)}`)
-
-      if (it.type.startsWith('image/')) {
-        try {
-          const compressedFile = await compressImage(it.file)
-          toUploadBlob = compressedFile
-          it.status = `فشرده شد — ${formatBytes(compressedFile.size)}`
-          console.log(`📉 تصویر ${it.file.name} — بعد از فشرده‌سازی: ${formatBytes(compressedFile.size)}`)
-        } catch (err) {
-          console.error('❌ خطا در فشرده‌سازی تصویر', err)
-          it.status = 'خطا در فشرده‌سازی تصویر — ارسال اصلی'
-          toUploadBlob = it.file
-        }
-      } else if (it.type.startsWith('video/')) {
-        try {
-          const compressedVideoBlob = await compressVideo(it.file, {
-            width: videoTargetWidth.value,
-            kbps: videoTargetKbps.value,
-          })
-          toUploadBlob = new File(
-            [compressedVideoBlob],
-            it.file.name.replace(/\.[^.]+$/, '.webm'),
-            { type: compressedVideoBlob.type },
-          )
-          it.status = `فشرده شد — ${formatBytes(toUploadBlob.size)}`
-          it.compressedUrl = URL.createObjectURL(compressedVideoBlob)
-          console.log(`📉 ویدئو ${it.file.name} — بعد از فشرده‌سازی: ${formatBytes(toUploadBlob.size)}`)
-        } catch (err) {
-          console.error('❌ خطا در فشرده‌سازی ویدئو', err)
-          it.status = 'خطا در فشرده‌سازی ویدئو — ارسال اصلی'
-          toUploadBlob = it.file
-        }
-      } else {
-        toUploadBlob = it.file
-      }
-
-      console.log(`⬆️ شروع آپلود: ${it.file.name}`)
-      it.status = 'در حال آپلود'
-      await uploadFile(toUploadBlob, it)
-    }
-  } finally {
-    processing.value = false
-  }
-}
-
-async function uploadFile(blobOrFile, it) {
-  const url = 'https://httpbin.org/post' // آدرس تستی — به سرور خودت تغییر بده
-  const form = new FormData()
-  form.append('file', blobOrFile, blobOrFile.name || 'upload')
-
-  try {
-    const res = await axios.post(url, form, {
-      headers: { 'Content-Type': 'multipart/form-data' },
-      onUploadProgress: (e) => {
-        if (e.lengthComputable) {
-          it.progress = Math.round((e.loaded * 100) / e.total)
-        }
-      },
-      timeout: 5 * 60 * 1000,
-    })
-    it.status = 'آپلود موفق'
-    lastResponse.value = JSON.stringify(res.data).slice(0, 2000)
-
-    // چون httpbin فایل واقعی باز نمی‌گرداند، برای تست لینک blob ایجاد می‌کنیم
-    it.uploadedUrl = URL.createObjectURL(blobOrFile)
-    console.log(`✅ آپلود موفق: ${it.file.name}`)
-  } catch (err) {
-    console.error('❌ خطا در آپلود', err)
-    it.status = 'خطا در آپلود'
-  }
-}
-
-// ------------------ Image compression ------------------
-async function compressImage(file) {
-  const options = {
-    maxSizeMB: imageMaxMB.value,
-    maxWidthOrHeight: imageMaxWidth.value,
-    useWebWorker: true,
-    initialQuality: imageQuality.value,
-  }
-  const compressedFile = await imageCompression(file, options)
-  return compressedFile
-}
-
-// ------------------ Video compression ------------------
 function compressVideo(file, { width = 1280, kbps = 800 } = {}) {
   return new Promise((resolve, reject) => {
-    if (typeof MediaRecorder === 'undefined') return reject(new Error('MediaRecorder پشتیبانی نمی‌شود'))
+    if (typeof MediaRecorder === 'undefined')
+      return reject(new Error('MediaRecorder پشتیبانی نمی‌شود'))
 
     const url = URL.createObjectURL(file)
     const video = document.createElement('video')
@@ -222,104 +128,172 @@ function compressVideo(file, { width = 1280, kbps = 800 } = {}) {
     video.playsInline = true
     video.preload = 'auto'
 
-    video.addEventListener('loadedmetadata', async () => {
-      try {
-        const aspect = video.videoWidth / video.videoHeight
-        const targetWidth = Math.min(width, video.videoWidth)
-        const targetHeight = Math.round(targetWidth / aspect)
-
-        const canvas = document.createElement('canvas')
-        canvas.width = targetWidth
-        canvas.height = targetHeight
-        const ctx = canvas.getContext('2d')
-
-        const fps = 25
-        const stream = canvas.captureStream(fps)
-
-        const mimeTypeCandidates = ['video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm']
-        const mimeType =
-          mimeTypeCandidates.find((m) => MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(m)) ||
-          'video/webm'
-
-        const bitrate = kbps * 1000
-        const options = { mimeType, videoBitsPerSecond: bitrate }
-
-        const recordedChunks = []
-        let mediaRecorder
+    video.addEventListener(
+      'loadedmetadata',
+      () => {
         try {
-          mediaRecorder = new MediaRecorder(stream, options)
+          const aspect = video.videoWidth / video.videoHeight
+          const targetWidth = Math.min(width, video.videoWidth)
+          const targetHeight = Math.round(targetWidth / aspect)
+
+          const canvas = document.createElement('canvas')
+          canvas.width = targetWidth
+          canvas.height = targetHeight
+          const ctx = canvas.getContext('2d')
+
+          const fps = 25
+          const stream = canvas.captureStream(fps)
+
+          const mimeTypeCandidates = [
+            'video/webm;codecs=vp9',
+            'video/webm;codecs=vp8',
+            'video/webm',
+          ]
+          const mimeType =
+            mimeTypeCandidates.find(
+              (m) => MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(m),
+            ) || 'video/webm'
+
+          const bitrate = kbps * 1000
+          const options = { mimeType, videoBitsPerSecond: bitrate }
+
+          const recordedChunks = []
+          const mediaRecorder = new MediaRecorder(stream, options)
+
+          mediaRecorder.ondataavailable = (ev) => {
+            if (ev.data && ev.data.size) recordedChunks.push(ev.data)
+          }
+
+          mediaRecorder.onstop = () => {
+            const blob = new Blob(recordedChunks, { type: mimeType })
+            URL.revokeObjectURL(url)
+            resolve(blob)
+          }
+
+          video.addEventListener('play', () => {
+            mediaRecorder.start(1000)
+            function draw() {
+              if (video.paused || video.ended) {
+                try {
+                  mediaRecorder.stop()
+                } catch {}
+                return
+              }
+              ctx.drawImage(video, 0, 0, canvas.width, canvas.height)
+              requestAnimationFrame(draw)
+            }
+            requestAnimationFrame(draw)
+          })
+
+          video.play().catch((err) => reject(err))
         } catch (err) {
           reject(err)
-          return
         }
-
-        mediaRecorder.ondataavailable = (ev) => {
-          if (ev.data && ev.data.size) recordedChunks.push(ev.data)
-        }
-
-        mediaRecorder.onstop = () => {
-          const blob = new Blob(recordedChunks, { type: mimeType })
-          URL.revokeObjectURL(url)
-          resolve(blob)
-        }
-
-        video.addEventListener('play', () => {
-          mediaRecorder.start(1000)
-          function draw() {
-            if (video.paused || video.ended) {
-              try { mediaRecorder.stop() } catch {}
-              return
-            }
-            ctx.drawImage(video, 0, 0, canvas.width, canvas.height)
-            requestAnimationFrame(draw)
-          }
-          requestAnimationFrame(draw)
-        })
-
-        video.play().catch((err) => reject(err))
-      } catch (err) {
-        reject(err)
-      }
-    }, { once: true })
+      },
+      { once: true },
+    )
 
     video.addEventListener('error', () => reject(new Error('خطا در بارگذاری ویدئو')))
   })
 }
 </script>
-
 <style scoped>
 .uploader {
+  max-width: 500px;
+  margin: 20px auto;
+}
+.uploader {
   max-width: 900px;
-  margin: 1rem auto;
-  padding: 1rem;
+  margin: 2rem auto;
+  padding: 1.5rem;
   border: 1px solid #ddd;
-  border-radius: 8px;
+  border-radius: 10px;
+  background: #fafafa;
+  box-shadow: 0 4px 10px rgba(0, 0, 0, 0.05);
+  font-family: 'Vazir', sans-serif;
 }
-.items {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 1rem;
+
+h2 {
+  text-align: center;
+  margin-bottom: 1.5rem;
+  color: #333;
 }
-.item-card {
-  display: flex;
-  gap: 1rem;
-  border: 1px solid #eee;
+
+.file-input {
+  display: block;
+  margin: 0 auto 1rem;
   padding: 0.5rem;
   border-radius: 6px;
+  border: 1px solid #ccc;
+  width: 100%;
+  max-width: 400px;
 }
-.preview img,
-.preview video {
-  max-width: 160px;
-  max-height: 120px;
-  display: block;
-}
+
 .controls {
-  margin-top: 1rem;
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.5rem;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 1rem;
+  margin-bottom: 1.5rem;
 }
+
+.control-item {
+  display: flex;
+  flex-direction: column;
+}
+
+.control-item label {
+  font-size: 0.9rem;
+  margin-bottom: 0.3rem;
+  color: #555;
+}
+
+.control-item input {
+  padding: 0.4rem 0.5rem;
+  border-radius: 5px;
+  border: 1px solid #ccc;
+}
+
 .actions {
-  margin-top: 1rem;
+  display: flex;
+  gap: 0.8rem;
+  justify-content: center;
+  margin-bottom: 1rem;
+}
+
+.actions button {
+  padding: 0.6rem 1.2rem;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  background: #4caf50;
+  color: white;
+  font-weight: 500;
+  transition: background 0.2s;
+}
+
+.actions button:disabled {
+  background: #aaa;
+  cursor: not-allowed;
+}
+
+.actions button:hover:not(:disabled) {
+  background: #45a049;
+}
+
+.clear-btn {
+  background: #f44336;
+}
+
+.clear-btn:hover {
+  background: #d32f2f;
+}
+
+.server-response {
+  background: #f0f0f0;
+  padding: 0.8rem;
+  border-radius: 6px;
+  font-size: 0.9rem;
+  color: #333;
+  overflow-x: auto;
 }
 </style>
