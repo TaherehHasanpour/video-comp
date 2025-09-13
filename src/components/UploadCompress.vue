@@ -12,14 +12,24 @@
     />
 
     <div class="controls">
-      <label
-        >رزولوشن هدف ویدئو (عرض px):
+      <label>
+        رزولوشن هدف ویدئو (عرض px):
         <input type="number" v-model.number="videoTargetWidth" />
       </label>
-      <label
-        >بیت‌ریت هدف ویدئو (kbps):
+      <label>
+        بیت‌ریت هدف ویدئو (kbps):
         <input type="number" v-model.number="videoTargetKbps" />
       </label>
+    </div>
+
+    <div v-for="f in uploadedFiles" :key="f.id" class="file-preview">
+      <a :href="f.downloadUrl" download>دانلود {{ f.name }}</a>
+      <video
+        v-if="f.type.startsWith('video/')"
+        controls
+        :src="f.downloadUrl"
+        style="max-width:100%; margin-top:0.5rem;"
+      ></video>
     </div>
   </div>
 </template>
@@ -31,23 +41,18 @@ import FilePondPluginFileValidateType from 'filepond-plugin-file-validate-type'
 import FilePondPluginFileEncode from 'filepond-plugin-file-encode'
 import axios from 'axios'
 
+// ------------------ FilePond ------------------
 const FilePond = vueFilePond(FilePondPluginFileValidateType, FilePondPluginFileEncode)
 const pond = ref(null)
-// درست:
-// const FilePond = vueFilePond(FilePondPluginFileValidateType)
 
-// import FilePondPluginFileValidateType from 'filepond-plugin-file-validate-type'
-
-// const FilePond = vueFilePond(FilePondPluginFileValidateType, FilePondPluginFileEncode) // حذف شد
-// const FilePond = vueFilePond(FilePondPluginFileValidateType)
-
+// ------------------ Reactive ------------------
 const videoTargetWidth = ref(1280)
 const videoTargetKbps = ref(800)
+const uploadedFiles = ref([]) // ذخیره فایل‌ها و لینک دانلود
 
 // ------------------ Config Server ------------------
 const serverConfig = {
   process: (fieldName, file, metadata, load, error, progress, abort) => {
-    // فقط برای تست، آپلود مستقیم به httpbin
     const formData = new FormData()
     formData.append(fieldName, file, file.name)
 
@@ -58,11 +63,9 @@ const serverConfig = {
         },
       })
       .then((res) => {
-        load(res.data.url || file.name) // URL فایل آپلود شده
+        load(res.data.url || file.name)
       })
-      .catch((err) => {
-        error('Upload failed')
-      })
+      .catch(() => error('Upload failed'))
 
     return {
       abort: () => {
@@ -73,7 +76,7 @@ const serverConfig = {
   },
 }
 
-// ------------------ فایل اضافه شد ------------------
+// ------------------ Event: فایل اضافه شد ------------------
 async function onAddFile(error, fileItem) {
   if (error) return
 
@@ -97,17 +100,25 @@ async function onAddFile(error, fileItem) {
         type: compressedBlob.type,
       })
 
-      // اضافه کردن metadata برای جلوگیری از دوباره فشرده کردن
+      // جایگزین کردن فایل اصلی در FilePond
       pond.value.removeFile(fileItem.id)
       const newFileItem = await pond.value.addFile(compressedFile)
       newFileItem.setMetadata('compressed', true)
+
+      // ذخیره لینک دانلود و اطلاعات فایل
+      uploadedFiles.value.push({
+        id: newFileItem.id,
+        name: compressedFile.name,
+        downloadUrl: URL.createObjectURL(compressedBlob),
+        type: compressedFile.type,
+      })
     } catch (err) {
       console.error('❌ خطا در فشرده‌سازی ویدئو', err)
     }
   }
 }
 
-// ------------------ کمکی ------------------
+// ------------------ توابع کمکی ------------------
 function formatBytes(bytes) {
   if (bytes === 0) return '0 B'
   const k = 1024
@@ -151,7 +162,7 @@ function compressVideo(file, { width = 1280, kbps = 800 } = {}) {
           ]
           const mimeType =
             mimeTypeCandidates.find(
-              (m) => MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(m),
+              (m) => MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(m)
             ) || 'video/webm'
 
           const bitrate = kbps * 1000
@@ -159,6 +170,7 @@ function compressVideo(file, { width = 1280, kbps = 800 } = {}) {
 
           const recordedChunks = []
           const mediaRecorder = new MediaRecorder(stream, options)
+          let started = false
 
           mediaRecorder.ondataavailable = (ev) => {
             if (ev.data && ev.data.size) recordedChunks.push(ev.data)
@@ -170,38 +182,37 @@ function compressVideo(file, { width = 1280, kbps = 800 } = {}) {
             resolve(blob)
           }
 
-          video.addEventListener('play', () => {
-            mediaRecorder.start(1000)
-            function draw() {
-              if (video.paused || video.ended) {
-                try {
-                  mediaRecorder.stop()
-                } catch {}
-                return
+          video
+            .play()
+            .then(() => {
+              if (!started) {
+                mediaRecorder.start(1000)
+                started = true
               }
-              ctx.drawImage(video, 0, 0, canvas.width, canvas.height)
+              function draw() {
+                if (video.paused || video.ended) {
+                  if (mediaRecorder.state === 'recording') mediaRecorder.stop()
+                  return
+                }
+                ctx.drawImage(video, 0, 0, canvas.width, canvas.height)
+                requestAnimationFrame(draw)
+              }
               requestAnimationFrame(draw)
-            }
-            requestAnimationFrame(draw)
-          })
-
-          video.play().catch((err) => reject(err))
+            })
+            .catch((err) => reject(err))
         } catch (err) {
           reject(err)
         }
       },
-      { once: true },
+      { once: true }
     )
 
     video.addEventListener('error', () => reject(new Error('خطا در بارگذاری ویدئو')))
   })
 }
 </script>
+
 <style scoped>
-.uploader {
-  max-width: 500px;
-  margin: 20px auto;
-}
 .uploader {
   max-width: 900px;
   margin: 2rem auto;
@@ -219,16 +230,6 @@ h2 {
   color: #333;
 }
 
-.file-input {
-  display: block;
-  margin: 0 auto 1rem;
-  padding: 0.5rem;
-  border-radius: 6px;
-  border: 1px solid #ccc;
-  width: 100%;
-  max-width: 400px;
-}
-
 .controls {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
@@ -236,64 +237,14 @@ h2 {
   margin-bottom: 1.5rem;
 }
 
-.control-item {
-  display: flex;
-  flex-direction: column;
-}
-
-.control-item label {
-  font-size: 0.9rem;
-  margin-bottom: 0.3rem;
-  color: #555;
-}
-
-.control-item input {
+.controls label input {
+  width: 100%;
   padding: 0.4rem 0.5rem;
   border-radius: 5px;
   border: 1px solid #ccc;
 }
 
-.actions {
-  display: flex;
-  gap: 0.8rem;
-  justify-content: center;
+.file-preview {
   margin-bottom: 1rem;
-}
-
-.actions button {
-  padding: 0.6rem 1.2rem;
-  border: none;
-  border-radius: 6px;
-  cursor: pointer;
-  background: #4caf50;
-  color: white;
-  font-weight: 500;
-  transition: background 0.2s;
-}
-
-.actions button:disabled {
-  background: #aaa;
-  cursor: not-allowed;
-}
-
-.actions button:hover:not(:disabled) {
-  background: #45a049;
-}
-
-.clear-btn {
-  background: #f44336;
-}
-
-.clear-btn:hover {
-  background: #d32f2f;
-}
-
-.server-response {
-  background: #f0f0f0;
-  padding: 0.8rem;
-  border-radius: 6px;
-  font-size: 0.9rem;
-  color: #333;
-  overflow-x: auto;
 }
 </style>
