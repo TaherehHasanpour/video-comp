@@ -28,7 +28,7 @@
         v-if="f.type.startsWith('video/')"
         controls
         :src="f.downloadUrl"
-        style="max-width:100%; margin-top:0.5rem;"
+        style="max-width: 100%; margin-top: 0.5rem"
       ></video>
     </div>
   </div>
@@ -162,7 +162,7 @@ function compressVideo(file, { width = 1280, kbps = 800 } = {}) {
           ]
           const mimeType =
             mimeTypeCandidates.find(
-              (m) => MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(m)
+              (m) => MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(m),
             ) || 'video/webm'
 
           const bitrate = kbps * 1000
@@ -204,7 +204,7 @@ function compressVideo(file, { width = 1280, kbps = 800 } = {}) {
           reject(err)
         }
       },
-      { once: true }
+      { once: true },
     )
 
     video.addEventListener('error', () => reject(new Error('خطا در بارگذاری ویدئو')))
